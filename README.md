@@ -3,7 +3,7 @@
 Source: https://github.com/sherlock-audit/2024-04-xkeeper-judging/issues/57 
 
 ## Found by 
-IllIllI, Kirkeelee, Kose, LTDingZhen
+IllIllI, Kirkeelee, Kose, LTDingZhen, s1ce
 ## Summary
 
 L1 data fees are not reimbursed, and they are often orders of magnitude more expensive than the L2 gas fees being reimbursed. Not reimbursing these fees will lead to jobs not being executed on L2s.
@@ -68,128 +68,85 @@ Every L2 has its own formula for calculating the L1 data fee, so different versi
 
 
 
-# Issue M-2: Keepers can execute the `fallback` method even if it's not one of the approved selectors for that job. 
+**realfugazzi**
 
-Source: https://github.com/sherlock-audit/2024-04-xkeeper-judging/issues/68 
+Why is this an issue? This is not the responsibility of the OpenRelay contract.
+
+**adam-idarrha**
+
+@realfugazzi because that contract is in scope , and written by xkeeper .
+
+**realfugazzi**
+
+@IllIllI000 how is this not a feature request, according to your logic? 
+
+You are stating that L1 fees are not reimbursed, but there is no place where this is posted as protocol requirement. Job executioners will simulate the op and see if reimbursement is fit for them. Looks like a feature request then, correct?
+
+**ashitakah**
+
+I agree, it is true that the payments in L2 would be too low to incentivize the work and we are working on improving the system, but it is not a vulnerability and continues to pay although in a residual way.
+
+**IllIllI000**
+
+@ashitakah isn't "too low to incentivize the work" a future integration issue for any project looking to use xkeeper on an L2?
+
+**BoRonG0d**
+
+Contest readme explicitly states that the contract will be deployed on OP mainnet, and ALL information watson received during the competition did not indicate that OpenRelay would be used as future integration. So this is a valid issue.
+
+And, this was judged as high in the past:
+
+https://github.com/sherlock-audit/2023-07-perennial-judging/issues/91
+
+# Issue M-2: Keep3r Relay Implementations are Not Compatible with Keep3r in Optimism and Executions Will Always Revert 
+
+Source: https://github.com/sherlock-audit/2024-04-xkeeper-judging/issues/132 
 
 ## Found by 
-Tricko
+Kose
 ## Summary
-Because `_dataToExecute.jobData` is explicitly converted to `bytes4` in `AutomationVault.exec()`, the keeper can call the fallback method of the job contract even if it's not an approved job selector. This allows the keeper to repeatedly invoke the fallback method to farm rewards from that job.
-
+`Keep3rRelay` and `Keep3rBondedRelay` uses deprecated function for sidechains and `exec` calls will always revert.
 ## Vulnerability Detail
-Each job configured in the `AutomationVault` contract can have one or more approved selectors that the keeper can call. Below is a snippet from the `AutomationVault.exec()` function where the selectors are validated. First, it converts `_dataToExecute.jobData` to `bytes4` and checks if it matches one of the allowed selectors. If it does, the function proceeds to call that job contract with `_dataToExecute.jobData` as calldata.
-
+Keep3r takes different arguments for function `worked()` in sidechains in order to estimate gas usage and rewards for keepers properly:
 ```solidity
-      // Check that the selector is approved to be called
-      if (!_approvedJobSelectors[msg.sender][_dataToExecute.job].contains(bytes4(_dataToExecute.jobData))) {
-        revert AutomationVault_NotApprovedJobSelector();
-      }
-      (_success,) = _dataToExecute.job.call(_dataToExecute.jobData);
-      if (!_success) revert AutomationVault_ExecFailed();
+  /// @dev Sidechain implementation deprecates worked(address) as it should come with a usdPerGasUnit parameter
+  function worked(address) external pure override {
+    revert Deprecated();
+  }
+
+  /// @notice Implemented by jobs to show that a keeper performed work
+  /// @dev Uses a USD per gas unit payment mechanism
+  /// @param _keeper Address of the keeper that performed the work
+  /// @param _usdPerGasUnit Units of USD (in wei) per gas unit that should be rewarded to the keeper
+  function worked(address _keeper, uint256 _usdPerGasUnit) external override {
 ```
-
-However, the code assumes that `bytes4(_dataToExecute.jobData)` and `_dataToExecute.jobData` are equal, which is not always the case. If `_dataToExecute.jobData` is smaller than 4 bytes, the explicit conversion to `bytes4` will pad it with zero bytes, making `bytes4(_dataToExecute.jobData)` not equal to `_dataToExecute.jobData`.
-
-Consider this example: for a specified job, the approved selector is `0x8df82800` (for the `settle(uint256)` function). If the keeper sends the malformed `0x8df828` as `_dataToExecute.jobData`, the selector validation will succeed, but when the job contract is called, no function selector will match `0x8df828`, causing the fallback method (if it exists) to be executed. Thus, the fallback method can be called even though it was never approved for that job.
-
-This issue can be exploited under two conditions:
-- One of the approved function selectors for that job must have one or more`0x00` trailing bytes.
-- There must be a fallback method on the job contract.
-
-Considering the uniform distribution of function selectors (a fair assumption given they are the output of keccak256), the first condition will be met in approximately 0.39% of all approved selectors (1 trailing `0x00` byte (1/256) + 2 trailing `0x00` bytes (1/65536) + ... ). Although the probabilities are low, as the `AutomationVault` is supposed to be a general keeper aggregator, these situations will arise and potentially be exploited.
-
-By exploiting this issue, a malicious keeper can call `AutomationVault.exec()` without actually executing the intended job and instead only calling the `fallback` method, yet still receiving rewards. This can be done repeatedly to farm rewards from that job. If the fallback method also has negative side effects on the job, they can also be exploited by the malicious keeper.
-
-See the POC below. To run the POC apply the diff patch below and run the following `test_POC` test.
-
-```diff
-diff --git a/xkeeper-core/solidity/test/integration/OpenRelay.t.sol b/xkeeper-core/solidity/test/integration/OpenRelay
-.t.sol--
-index 7b40c3b..fac6c2b 100644
---- a/xkeeper-core/solidity/test/integration/OpenRelay.t.sol
-+++ b/xkeeper-core/solidity/test/integration/OpenRelay.t.sol
-@@ -5,7 +5,25 @@ import {CommonIntegrationTest} from '../integration/Common.t.sol';
- 
- import {IAutomationVault} from '../../interfaces/core/IAutomationVault.sol';
- 
-+contract Job {
-+  event Settled();
-+  event Fallback();
-+
-+  function settle(uint256) external {
-+    // Do stuff
-+    emit Settled();
-+  }re--
-+
-+  fallback() external payable {
-+    emit Fallback();
-+  }re--
-+}More--
-+
-+
- contract IntegrationOpenRelay is CommonIntegrationTest {
-+
-+  event Fallback();
-+
-   function setUp() public override {
-     // AutomationVault setup
-     CommonIntegrationTest.setUp();
-@@ -32,6 +50,38 @@ contract IntegrationOpenRelay is CommonIntegrationTest {
-     changePrank(bot);
-   }
- 
-+  function test_POC() public {
-+    // Start of setup
-+    Job jobContract = new Job();
-+
-+    address[] memory _bots = new address[](1);
-+    _bots[0] = bot;
-+
-+    bytes4[] memory _jobSelectors = new bytes4[](1);
-+    // 0x8df82800 -> bytes4(keccak256(abi.encode("settle(uint256)")))
-+    _jobSelectors[0] = bytes4(0x8df82800);
-+
-+    IAutomationVault.JobData[] memory _jobsData = new IAutomationVault.JobData[](1);
-+    _jobsData[0] = IAutomationVault.JobData(address(jobContract), _jobSelectors);
-+
-+    changePrank(owner);
-+    automationVault.modifyRelay(address(openRelay), _bots, _jobsData);
-+    address(automationVault).call{value: 100 ether}('');
-+
-+    changePrank(bot);
-+    // End of setup
-+
-+    IAutomationVault.ExecData[] memory _execData = new IAutomationVault.ExecData[](1);
-+    // Malformed selector to trigger the execution of the fallback method;
-+    bytes3 selector = bytes3(0x8df828);
-+    _execData[0] = IAutomationVault.ExecData(address(jobContract), abi.encodePacked(selector));
-+
-+    // Check that the fallback method was executed instead of the settle(uint256) function.
-+    vm.expectEmit(address(jobContract));
-+    emit Fallback();
-+    openRelay.exec(automationVault, _execData, bot);
-+  }re--
-+
+The snippet above taken from [Keep3rSidechain.sol](https://optimistic.etherscan.deth.net/address/0x745a50320B6eB8FF281f1664Fc6713991661B129#code) that is live in optimism currently. We can also see that this contract is exact contract that will be interacted as it is the address of `KEEPER_V2` in deployed Keep3r Relays by xKeeper in Optimism. Deployed addresses can checked from [here](https://docs.xkeeper.network/content/intro/index.html)
+But relay contracts implemented by xKeeper uses the `worked()` function that is deprecated:
+```solidity
+    // Inject the final call which will issue the payment to the keeper
+    _execDataKeep3r[_execDataLength + 1] = IAutomationVault.ExecData({
+      job: address(KEEP3R_V2),
+      jobData: abi.encodeWithSelector(IKeep3rV2.worked.selector, msg.sender)
+    });
 ```
-
+Hence in chains other than mainnet, Keep3r calls will always revert.
 ## Impact
-For jobs that match both conditions described above, the keeper can execute the `fallback` method despite it not being listed in the allowed selectors. This enables the keeper to farm rewards from that job or potentially trigger unintended side-effects from the `fallback` function.
-
+Current Keep3r Relay contracts are not compatible with Keep3r in Optimism (Keeper is only deployed to Mainnet and Optimism currently). Although vault creation will succeed, `exec()` called by keepers will always revert.
 ## Code Snippet
-https://github.com/sherlock-audit/2024-04-xkeeper/blob/main/xkeeper-core/solidity/contracts/core/AutomationVault.sol#L413-L418
-
+[Keep3rRelay.sol](https://github.com/sherlock-audit/2024-04-xkeeper/blob/main/xkeeper-core/solidity/contracts/relays/Keep3rRelay.sol/#L52-L55)
+[Keep3rBondedRelay.sol](https://github.com/sherlock-audit/2024-04-xkeeper/blob/main/xkeeper-core/solidity/contracts/relays/Keep3rBondedRelay.sol/#L76-L80)
 ## Tool used
+
 Manual Review
 
 ## Recommendation
-Consider checking that if `_dataToExecute.jobData` is at least 4 bytes long, thus preventing the issue described above from occurring.
+Either implement a compatible version for Keep3rSideChain, or don't use Keep3r in sidechains.
 
 
 
 ## Discussion
 
-**sherlock-admin4**
+**sherlock-admin3**
 
 1 comment(s) were left on this issue during the judging contest.
 
@@ -200,5 +157,51 @@ Consider checking that if `_dataToExecute.jobData` is at least 4 bytes long, thu
 
 **Hash01011122**
 
-This issue is a borderline low/medium severity, as the occurrence involves selectors which typically are standard operations like `work()` or `exec()`. However, it may lean towards medium severity since it represents an edge case, due to its complexity.
+Borderline Low/Med issue
+
+**kosedogus**
+
+Escalate
+
+The core contract functionality is broken for `Keep3rRelay.sol` and `Keep3rBondedRelay.sol` in all L2's. All `exec()` calls via these contracts will **always** revert, rendering contracts useless. This should be valid medium.
+
+**sherlock-admin2**
+
+> Escalate
+> 
+> The core contract functionality is broken for `Keep3rRelay.sol` and `Keep3rBondedRelay.sol` in all L2's. All `exec()` calls via these contracts will **always** revert, rendering contracts useless. This should be valid medium.
+
+You've created a valid escalation!
+
+To remove the escalation from consideration: Delete your comment.
+
+You may delete or edit your escalation comment anytime before the 48-hour escalation window closes. After that, the escalation becomes final.
+
+**ashitakah**
+
+The issue is right, in the L2 version of keep3r worked was deprecated, we have to generate versions of the keep3r relays in L2 with the updated worked.
+
+**Hash01011122**
+
+As I mentioned, above this issue is borderline low/medium issue. In earlier contest of sherlock, issues like this was considered as low severity issue, because of which I considered it as low. I will let head of judge decide the severity. 
+
+**cvetanovv**
+
+For me this issue is Medium and fits the rule:
+> Breaks **core** contract functionality, rendering the contract useless.
+
+I am planning to accept the escalation and make this issue Medium.
+
+**Evert0x**
+
+Result:
+Medium
+Unique 
+
+**sherlock-admin2**
+
+Escalations have been resolved successfully!
+
+Escalation status:
+- [kosedogus](https://github.com/sherlock-audit/2024-04-xkeeper-judging/issues/132/#issuecomment-2074155648): accepted
 
