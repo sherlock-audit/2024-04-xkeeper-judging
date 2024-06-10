@@ -2,6 +2,8 @@
 
 Source: https://github.com/sherlock-audit/2024-04-xkeeper-judging/issues/57 
 
+The protocol has acknowledged this issue.
+
 ## Found by 
 IllIllI, Kirkeelee, Kose, LTDingZhen, s1ce
 ## Summary
@@ -204,4 +206,10 @@ Escalations have been resolved successfully!
 
 Escalation status:
 - [kosedogus](https://github.com/sherlock-audit/2024-04-xkeeper-judging/issues/132/#issuecomment-2074155648): accepted
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/xkeeper-framework/xkeeper-core/commit/df7b21882a1073b334625a1be394e38a2bba1cb9
+
 
